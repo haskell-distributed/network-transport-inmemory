@@ -178,14 +178,17 @@ apiSend chan state lconn msg = do
         -- If the local connection was closed, check why.
         withMVar state $ \st -> case st of
           TransportValid vst -> do
-            let lepState =
-                  localEndPointState
-                    (vst ^. localEndPointAt (localConnectionLocalAddress lconn))
-            withMVar lepState $ \lepst -> case lepst of
-              LocalEndPointValid _ -> do
-                return $ Left $ TransportError SendClosed "Connection closed"
-              LocalEndPointClosed ->
+            let addr = localConnectionLocalAddress lconn
+                mblep = vst ^. (localEndPoints >>> DAC.mapMaybe addr)
+            case mblep of
+              Nothing ->
                 return $ Left $ TransportError SendFailed "Endpoint closed"
+              Just lep -> do
+                withMVar (localEndPointState lep) $ \lepst -> case lepst of
+                  LocalEndPointValid _ -> do
+                    return $ Left $ TransportError SendClosed "Connection closed"
+                  LocalEndPointClosed ->
+                    return $ Left $ TransportError SendFailed "Endpoint closed"
           TransportClosed ->
             return $ Left $ TransportError SendFailed "Transport closed"
 
