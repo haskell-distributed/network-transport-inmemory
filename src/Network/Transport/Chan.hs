@@ -79,7 +79,7 @@ apiSend chan conn connAlive msg =
         writeChan chan (Received conn msg)
         return (alive, Right ())
       else
-        return (alive, Left (TransportError SendFailed "Connection closed"))
+        return (alive, Left (TransportError SendClosed "Connection closed"))
 
 -- | Close a connection
 apiClose :: Chan Event -> ConnectionId -> MVar Bool -> IO ()
