@@ -14,9 +14,10 @@ import Control.Concurrent.MVar
   , readMVar
   , withMVar
   )
-import Control.Exception (handle, throwIO)
+import Control.Exception (handle, throw, throwIO)
 import Control.Monad (forM_)
 import Data.Map (Map)
+import Data.Maybe (fromMaybe, fromJust)
 import qualified Data.Map as Map
 import Data.Set (Set)
 import qualified Data.Set as Set
@@ -91,7 +92,7 @@ apiNewEndPoint state = handle (return . Left) $ do
             , localEndPointChannel = chan
             , localEndPointState = lepState
             }
-      return (TransportValid $ localEndPointAt addr ^= lep $ vst, addr)
+      return (TransportValid $ localEndPointAt addr ^= Just lep $ vst, addr)
     TransportClosed -> throwIO $ TransportError NewEndPointFailed "Transport closed"
   return $ Right $ EndPoint
     { receive       = readChan chan
@@ -105,16 +106,19 @@ apiNewEndPoint state = handle (return . Left) $ do
 apiCloseEndPoint :: MVar TransportState -> EndPointAddress -> IO ()
 apiCloseEndPoint state addr = modifyMVar_ state $ \st -> case st of
     TransportValid vst -> do
-      let lepState = localEndPointState (vst ^. localEndPointAt addr)
-      modifyMVar_ lepState $ \lepst -> case lepst of
-        LocalEndPointValid lepvst -> do
-          forM_ (Map.elems (lepvst ^. connections)) $ \lconn -> do
-            modifyMVar_ (localConnectionState lconn) $ \_ -> return LocalConnectionClosed
-          return LocalEndPointClosed
-        LocalEndPointClosed -> return LocalEndPointClosed
-      return $ TransportValid $
-        (localEndPoints ^: Map.delete addr) $
-        vst
+      case vst ^. localEndPointAt addr of
+        Nothing -> return $ TransportValid vst
+        Just lep -> do
+          modifyMVar_ (localEndPointState lep) $ \lepst -> case lepst of
+            LocalEndPointValid lepvst -> do
+              forM_ (Map.elems (lepvst ^. connections)) $ \lconn -> do
+                modifyMVar_ (localConnectionState lconn) $ \_ ->
+                  return LocalConnectionClosed
+              return LocalEndPointClosed
+            LocalEndPointClosed -> return LocalEndPointClosed
+          return $ TransportValid $
+            (localEndPoints ^: Map.delete addr) $
+            vst
     TransportClosed -> return TransportClosed
 
 -- | Create a new connection
@@ -129,8 +133,9 @@ apiConnect ourAddress state theirAddress _reliability _hints =
       ~(chan, lconn) <- do
         withMVar state $ \st -> case st of
           TransportValid vst -> do
-            let ourlep = vst ^. localEndPointAt ourAddress
-                theirlep = vst ^. localEndPointAt theirAddress
+            let err = throw $ TransportError ConnectFailed "Endpoint closed"
+                ourlep = fromMaybe err $ vst ^. localEndPointAt ourAddress
+                theirlep = fromMaybe err $ vst ^. localEndPointAt theirAddress
             -- No masking necessary, because we don't need atomicity here.
             conid <- modifyMVar (localEndPointState theirlep) $ \lepst -> case lepst of
               LocalEndPointValid lepvst -> do
@@ -138,12 +143,12 @@ apiConnect ourAddress state theirAddress _reliability _hints =
                        , lepvst ^. nextConnectionId
                        )
               LocalEndPointClosed ->
-                throwIO $ TransportError ConnectFailed "Remote endpoint closed"
+                throwIO $ TransportError ConnectFailed "endpoint closed"
             modifyMVar (localEndPointState ourlep) $ \lepst -> case lepst of
               LocalEndPointValid lepvst -> do
                 lconnState <- newMVar LocalConnectionValid
-                return ( LocalEndPointValid $ connectionsAt theirAddress ^= lconn $ lepvst
-                       , ( localEndPointChannel (vst ^. localEndPointAt theirAddress)
+                return ( LocalEndPointValid $ connectionAt theirAddress ^= lconn $ lepvst
+                       , ( localEndPointChannel theirlep
                          , LocalConnection
                              { localConnectionId = conid
                              , localConnectionLocalAddress = ourAddress
@@ -179,7 +184,7 @@ apiSend chan state lconn msg = do
         withMVar state $ \st -> case st of
           TransportValid vst -> do
             let addr = localConnectionLocalAddress lconn
-                mblep = vst ^. (localEndPoints >>> DAC.mapMaybe addr)
+                mblep = vst ^. localEndPointAt addr
             case mblep of
               Nothing ->
                 return $ Left $ TransportError SendFailed "Endpoint closed"
@@ -205,12 +210,15 @@ apiClose chan state lconn = do
     LocalConnectionClosed -> return LocalConnectionClosed
   withMVar state $ \st -> case st of
     TransportValid vst -> do
-      let lep = vst ^. localEndPointAt (localConnectionLocalAddress lconn)
+      let mblep = vst ^. localEndPointAt (localConnectionLocalAddress lconn)
           theirAddress = localConnectionRemoteAddress lconn
-      modifyMVar_ (localEndPointState lep) $ \lepst -> case lepst of
-        LocalEndPointValid lepvst -> do
-          return $ LocalEndPointValid $ (connections ^: Map.delete theirAddress) lepvst
-        LocalEndPointClosed -> return LocalEndPointClosed
+      case mblep of
+        Nothing -> return ()
+        Just lep -> do
+          modifyMVar_ (localEndPointState lep) $ \lepst -> case lepst of
+            LocalEndPointValid lepvst -> do
+              return $ LocalEndPointValid $ (connections ^: Map.delete theirAddress) lepvst
+            LocalEndPointClosed -> return LocalEndPointClosed
     TransportClosed -> return ()
 
 -- | Create a new multicast group
@@ -219,7 +227,8 @@ apiNewMulticastGroup state ourAddress = handle (return . Left) $ do
   group <- newMVar Set.empty
   groupAddr <- withMVar state $ \st -> case st of
     TransportValid vst -> do
-      let lep = vst ^. localEndPointAt ourAddress
+      let err = throw $ TransportError NewMulticastGroupFailed "Endpoint closed"
+          lep = fromMaybe err $ vst ^. localEndPointAt ourAddress
       modifyMVar (localEndPointState lep) $ \lepst -> case lepst of
         LocalEndPointValid lepvst -> do
           let addr =
@@ -242,7 +251,8 @@ createMulticastGroup state ourAddress groupAddress group = MulticastGroup
     { multicastAddress     = groupAddress
     , deleteMulticastGroup = withMVar state $ \st -> case st of
         TransportValid vst -> do
-          let lep = vst ^. localEndPointAt ourAddress
+          -- XXX best we can do given current broken API, which needs fixing.
+          let lep = fromJust $ vst ^. localEndPointAt ourAddress
           modifyMVar_ (localEndPointState lep) $ \lepst -> case lepst of
             LocalEndPointValid lepvst ->
               return $ LocalEndPointValid $ multigroups ^: Map.delete groupAddress $ lepvst
@@ -254,7 +264,7 @@ createMulticastGroup state ourAddress groupAddress group = MulticastGroup
           TransportValid vst -> do
             es <- readMVar group
             forM_ (Set.elems es) $ \ep -> do
-              let ch = localEndPointChannel (vst ^. localEndPointAt ep)
+              let ch = localEndPointChannel $ fromJust $ vst ^. localEndPointAt ep
               writeChan ch (ReceivedMulticast groupAddress payload)
           TransportClosed ->
             throwIO $ TransportError SendFailed "Transport closed"
@@ -272,7 +282,8 @@ apiResolveMulticastGroup state ourAddress groupAddress = handle (return . Left) 
   st <- readMVar state
   case st of
     TransportValid vst -> do
-      let lep = vst ^. localEndPointAt ourAddress
+      let err = throw $ TransportError ResolveMulticastGroupFailed "Endpoint closed"
+      let lep = fromMaybe err $ vst ^. localEndPointAt ourAddress
       withMVar (localEndPointState lep) $ \lepst -> case lepst of
         LocalEndPointValid lepvst -> do
           let group = lepvst ^. (multigroups >>> DAC.mapMaybe groupAddress)
@@ -307,11 +318,11 @@ multigroups = accessor _multigroups (\gs st -> st { _multigroups = gs })
 at :: Ord k => k -> String -> Accessor (Map k v) v
 at k err = accessor (Map.findWithDefault (error err) k) (Map.insert k)
 
-localEndPointAt :: EndPointAddress -> Accessor ValidTransportState LocalEndPoint
-localEndPointAt addr = localEndPoints >>> at addr "Invalid endpoint"
+localEndPointAt :: EndPointAddress -> Accessor ValidTransportState (Maybe LocalEndPoint)
+localEndPointAt addr = localEndPoints >>> DAC.mapMaybe addr
 
-connectionsAt :: EndPointAddress -> Accessor ValidLocalEndPointState LocalConnection
-connectionsAt addr = connections >>> at addr "Invalid connection"
+connectionAt :: EndPointAddress -> Accessor ValidLocalEndPointState LocalConnection
+connectionAt addr = connections >>> at addr "Invalid connection"
 
 multigroupAt :: MulticastAddress -> Accessor ValidLocalEndPointState (MVar (Set EndPointAddress))
 multigroupAt addr = multigroups >>> at addr "Invalid multigroup"
