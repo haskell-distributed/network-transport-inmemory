@@ -6,6 +6,7 @@ module Network.Transport.Chan (createTransport) where
 
 import Network.Transport
 import Network.Transport.Internal ( mapIOException )
+import Control.Applicative
 import Control.Concurrent.Chan (Chan, newChan, readChan, writeChan, isEmptyChan)
 import Control.Category ((>>>))
 import Control.Concurrent.MVar
