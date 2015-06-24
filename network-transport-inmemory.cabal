@@ -46,3 +46,15 @@ Test-Suite TestInMemory
   Main-Is:         TestInMemory.hs
   ghc-options:     -Wall -fno-warn-unused-do-bind
   HS-Source-Dirs:  tests
+
+benchmark BenchmarksPing
+  type:            exitcode-stdio-1.0
+  main-is:         LocalPing.hs
+  build-depends:   base >= 4.3 && < 5,
+                   criterion,
+                   deepseq,
+                   network-transport,
+                   network-transport-inmemory,
+                   network-transport-benchmarks < 0.2
+  ghc-options:     -Wall -O2 -fmax-simplifier-iterations=10 -fdicts-cheap -fspec-constr-count=6
+  hs-source-dirs:  bench
