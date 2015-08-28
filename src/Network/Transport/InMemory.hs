@@ -53,7 +53,7 @@ data LocalEndPointState
 data ValidLocalEndPointState = ValidLocalEndPointState
   { _nextConnectionId :: !ConnectionId
   , _connections :: !(Map (EndPointAddress,ConnectionId) LocalConnection)
-  , _multigroups :: Map MulticastAddress (TVar (Set EndPointAddress))
+  , _multigroups :: !(Map MulticastAddress (TVar (Set EndPointAddress)))
   }
 
 data LocalConnection = LocalConnection
