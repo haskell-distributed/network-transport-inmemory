@@ -108,7 +108,7 @@ createTransportExposeInternals = do
 apiNewEndPoint :: TVar TransportState
                -> IO (Either (TransportError NewEndPointErrorCode) EndPoint)
 apiNewEndPoint state = handle (return . Left) $ atomically $ do
-  chan <- newTChan
+  chan <- newBroadcastTChan
   (lep,addr) <- withValidTransportState state NewEndPointFailed $ \vst -> do
     lepState <- newTVar $ LocalEndPointValid $ ValidLocalEndPointState
       { _nextConnectionId = 1
@@ -124,9 +124,10 @@ apiNewEndPoint state = handle (return . Left) $ atomically $ do
           }
     writeTVar state (TransportValid $ localEndPointAt addr ^= Just lep $ r)
     return (lep, addr)
+  rchan <- dupTChan chan
   return $ Right $ EndPoint
     { receive       = atomically $ do
-        result <- tryReadTChan chan
+        result <- tryReadTChan rchan
         case result of
           Nothing -> do st <- readTVar (localEndPointState lep)
                         case st of
