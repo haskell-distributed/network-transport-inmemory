@@ -150,7 +150,8 @@ apiNewEndPoint state = handle (return . Left) $ atomically $ do
       TransportError ResolveMulticastGroupUnsupported "Multicast not supported"
 
 apiCloseEndPoint :: TVar TransportState -> EndPointAddress -> IO ()
-apiCloseEndPoint state addr = atomically $ whenValidTransportState state $ \vst ->
+apiCloseEndPoint state addr = do
+  atomically $ whenValidTransportState state $ \vst ->
     forM_ (vst ^. localEndPointAt addr) $ \lep -> do
       old <- swapTVar (localEndPointState lep) LocalEndPointClosed
       case old of
@@ -168,6 +169,13 @@ apiCloseEndPoint state addr = atomically $ whenValidTransportState state $ \vst 
           writeTChan (localEndPointChannel lep) EndPointClosed
           let x = (localEndPoints ^: Map.delete addr) vst
           x `seq` writeTVar state (TransportValid x)
+  atomically $ whenValidTransportState state $ \vst ->
+    for_ (_localEndPoints vst) $ \lep -> do
+      whenValidLocalEndPointState lep $ \vlp -> do
+        let (rm, ok) = Map.partitionWithKey (\(t,_) _ -> t == addr) $ _connections vlp
+        for_ rm $ \cn ->
+          swapTVar (localConnectionState cn) LocalConnectionFailed
+        writeTVar (localEndPointState lep) (LocalEndPointValid $! connections ^= ok $ vlp)
 
 
 -- | Function that simulate failing connection between two endpoints,
