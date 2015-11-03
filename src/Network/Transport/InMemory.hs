@@ -52,7 +52,7 @@ data LocalEndPointState
 data ValidLocalEndPointState = ValidLocalEndPointState
   { _nextConnectionId :: !ConnectionId
   , _connections :: !(Map (EndPointAddress,ConnectionId) LocalConnection)
-  , _multigroups :: Map MulticastAddress (TVar (Set EndPointAddress))
+  , _multigroups :: !(Map MulticastAddress (TVar (Set EndPointAddress)))
   }
 
 data LocalConnection = LocalConnection
@@ -107,7 +107,7 @@ createTransportExposeInternals = do
 apiNewEndPoint :: TVar TransportState
                -> IO (Either (TransportError NewEndPointErrorCode) EndPoint)
 apiNewEndPoint state = handle (return . Left) $ atomically $ do
-  chan <- newTChan
+  chan <- newBroadcastTChan
   (lep,addr) <- withValidTransportState state NewEndPointFailed $ \vst -> do
     lepState <- newTVar $ LocalEndPointValid $ ValidLocalEndPointState
       { _nextConnectionId = 1
@@ -121,11 +121,13 @@ apiNewEndPoint state = handle (return . Left) $ atomically $ do
           , localEndPointChannel = chan
           , localEndPointState = lepState
           }
-    writeTVar state (TransportValid $ localEndPointAt addr ^= Just lep $ r)
+    let x = localEndPointAt addr ^= Just lep $ r
+    x `seq` writeTVar state (TransportValid x)
     return (lep, addr)
+  rchan <- dupTChan chan
   return $ Right $ EndPoint
     { receive       = atomically $ do
-        result <- tryReadTChan chan
+        result <- tryReadTChan rchan
         case result of
           Nothing -> do st <- readTVar (localEndPointState lep)
                         case st of
@@ -147,7 +149,8 @@ apiNewEndPoint state = handle (return . Left) $ atomically $ do
       TransportError ResolveMulticastGroupUnsupported "Multicast not supported"
 
 apiCloseEndPoint :: TVar TransportState -> EndPointAddress -> IO ()
-apiCloseEndPoint state addr = atomically $ whenValidTransportState state $ \vst ->
+apiCloseEndPoint state addr = do
+  atomically $ whenValidTransportState state $ \vst ->
     forM_ (vst ^. localEndPointAt addr) $ \lep -> do
       old <- swapTVar (localEndPointState lep) LocalEndPointClosed
       case old of
@@ -163,8 +166,16 @@ apiCloseEndPoint state addr = atomically $ whenValidTransportState state $ \vst 
                         writeTChan (localEndPointChannel thep)
                                    (ConnectionClosed (localConnectionId lconn))
           writeTChan (localEndPointChannel lep) EndPointClosed
-          writeTVar  (localEndPointState lep)    LocalEndPointClosed
-      writeTVar state (TransportValid $ (localEndPoints ^: Map.delete addr) vst)
+          let x = (localEndPoints ^: Map.delete addr) vst
+          x `seq` writeTVar state (TransportValid x)
+  atomically $ whenValidTransportState state $ \vst ->
+    for_ (_localEndPoints vst) $ \lep -> do
+      whenValidLocalEndPointState lep $ \vlp -> do
+        let (rm, ok) = Map.partitionWithKey (\(t,_) _ -> t == addr) $ _connections vlp
+        for_ rm $ \cn ->
+          swapTVar (localConnectionState cn) LocalConnectionFailed
+        writeTVar (localEndPointState lep) (LocalEndPointValid $! connections ^= ok $ vlp)
+
 
 -- | Function that simulate failing connection between two endpoints,
 -- after calling this function both endpoints will receive ConnectionEventLost
@@ -195,10 +206,10 @@ apiBreakConnection state us them msg
         whenValidLocalEndPointState lep $ \lepvst -> do
           let (cl, other) = Map.partitionWithKey (\(addr,_) _ -> addr == b)
                                                  (lepvst ^.connections)
-          forM_ cl $ \c -> modifyTVar (localConnectionState c)
-                                      (\x -> case x of
-                                               LocalConnectionValid -> LocalConnectionFailed
-                                               _ -> x)
+          forM_ cl $ \c -> modifyTVar' (localConnectionState c)
+                                       (\x -> case x of
+                                                LocalConnectionValid -> LocalConnectionFailed
+                                                _ -> x)
           writeTChan (localEndPointChannel lep)
                      (ErrorEvent (TransportError (EventConnectionLost b) msg))
           writeTVar (localEndPointState lep)
@@ -226,7 +237,7 @@ apiConnect ourAddress state theirAddress _reliability _hints = do
                         Just x  -> return x
           conid <- withValidLocalEndPointState theirlep ConnectFailed $ \lepvst -> do
             let r = nextConnectionId ^: (+ 1) $ lepvst
-            writeTVar (localEndPointState theirlep) (LocalEndPointValid r)
+            r `seq` writeTVar (localEndPointState theirlep) (LocalEndPointValid r)
             return (r ^. nextConnectionId)
           withValidLocalEndPointState ourlep ConnectFailed $ \lepvst -> do
             lconnState <- newTVar LocalConnectionValid
