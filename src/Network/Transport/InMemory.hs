@@ -7,6 +7,8 @@ module Network.Transport.InMemory
   , createTransportExposeInternals
   -- * For testing purposes
   , TransportInternals(..)
+  , TransportState(..)
+  , ValidTransportState(..)
   , breakConnection
   ) where
 
